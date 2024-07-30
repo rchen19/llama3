@@ -94,9 +94,11 @@ class Attention(nn.Module):
         model_parallel_size = fs_init.get_model_parallel_world_size()
         self.n_local_heads = args.n_heads // model_parallel_size
         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
-        self.n_rep = self.n_local_heads // self.n_local_kv_heads
+        self.n_rep = self.n_local_heads // self.n_local_kv_heads  # equivalent to n_heads // n_kv_heads
         self.head_dim = args.dim // args.n_heads
 
+        # linear layer to compute query matrix from input
+        # embedding_dim -> n_heads * head_dim
         self.wq = ColumnParallelLinear(
             args.dim,
             args.n_heads * self.head_dim,
@@ -104,6 +106,8 @@ class Attention(nn.Module):
             gather_output=False,
             init_method=lambda x: x,
         )
+        # linear layer to compute key matrix from input
+        # embedding_dim -> n_kv_heads * head_dim
         self.wk = ColumnParallelLinear(
             args.dim,
             self.n_kv_heads * self.head_dim,
@@ -111,6 +115,8 @@ class Attention(nn.Module):
             gather_output=False,
             init_method=lambda x: x,
         )
+        # linear layer to compute value matrix from input
+        # embedding_dim -> n_kv_heads * head_dim
         self.wv = ColumnParallelLinear(
             args.dim,
             self.n_kv_heads * self.head_dim,
@@ -118,6 +124,8 @@ class Attention(nn.Module):
             gather_output=False,
             init_method=lambda x: x,
         )
+        # linear layer for linear projection right before the output
+        # of attention block
         self.wo = RowParallelLinear(
             args.n_heads * self.head_dim,
             args.dim,
@@ -125,7 +133,7 @@ class Attention(nn.Module):
             input_is_parallel=True,
             init_method=lambda x: x,
         )
-
+        # key cache of size [batch_size, max_sequence_len, num_kv_heads, dim_each_heads]
         self.cache_k = torch.zeros(
             (
                 args.max_batch_size,
@@ -134,6 +142,7 @@ class Attention(nn.Module):
                 self.head_dim,
             )
         ).cuda()
+        # value cache of size [batch_size, max_sequence_len, num_kv_heads, dim_each_heads]
         self.cache_v = torch.zeros(
             (
                 args.max_batch_size,
@@ -151,6 +160,10 @@ class Attention(nn.Module):
         mask: Optional[torch.Tensor],
     ):
         bsz, seqlen, _ = x.shape
+        # the last dimension is embedding dim (args.dim)
+        # then:n_kv_heads
+        # wq: embedding_dim -> n_heads * head_dim
+        # wk and wv: embedding_dim -> n_kv_heads * head_dim
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
@@ -169,6 +182,7 @@ class Attention(nn.Module):
         values = self.cache_v[:bsz, : start_pos + seqlen]
 
         # repeat k/v heads if n_kv_heads < n_heads
+        # where n_rep = n_local_heads // n_local_kv_heads == n_heads // n_kv_heads
         keys = repeat_kv(
             keys, self.n_rep
         )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
