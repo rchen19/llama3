@@ -197,6 +197,15 @@ class Attention(nn.Module):
         )  # (bs, n_local_heads, cache_len + seqlen, head_dim)
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
         if mask is not None:
+            # mask has diagnal == -inf, the rest 0
+            # also need to pad it by the size of cache with 0 values
+            # mask shape[seqlen, start_pos + seqlen]
+            # e.g., when seqlen is 5, and start_pos is 2, start_pos == cache_len
+            # [[0, 0, 0, -inf, -inf, -inf, -inf],
+            #  [0, 0, 0,    0, -inf, -inf, -inf],
+            #  [0, 0, 0,    0,    0, -inf, -inf],
+            #  [0, 0, 0,    0,    0,    0, -inf],
+            #  [0, 0, 0,    0,    0,    0,    0]]
             scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
         output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
@@ -299,6 +308,7 @@ class Transformer(nn.Module):
         if seqlen > 1:
             mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device)
 
+            # mask of upper triangle being `-inf` and the rest including diagnal being 0
             mask = torch.triu(mask, diagonal=1)
 
             # When performing key-value caching, we compute the attention scores
@@ -307,7 +317,7 @@ class Transformer(nn.Module):
             # j > cache_len + i, since row i corresponds to token cache_len + i.
             mask = torch.hstack(
                 [torch.zeros((seqlen, start_pos), device=tokens.device), mask]
-            ).type_as(h)
+            ).type_as(h)  # -> shape[seqlen, start_pos + seqlen]
 
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
